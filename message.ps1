@@ -1,225 +1,396 @@
-<# 
-    Stop-RedTeam.ps1
-    Purpose: Immediately sever C2 to 167.71.174.87:5555, kill "Windows Font Utility",
-             quarantine the binary, and remove common persistence.
-    Usage (elevated):
-      Set-ExecutionPolicy Bypass -Scope Process -Force
-      .\Stop-RedTeam.ps1
+<#
+  Stop-RedTeam-NoErrors.ps1
+  Purpose: Defensive containment for a named malicious process + C2 IP:Port.
+  - Blocks IP/port via Windows Firewall (idempotent)
+  - Finds connections (Get-NetTCPConnection or netstat fallback)
+  - Finds & stops matching processes (by name or by connection PID)
+  - Exports event logs (best-effort)
+  - Quarantines discovered binaries (move to C:\Quarantine_<ts>)
+  - Attempts to remove common persistence (scheduled tasks, Run keys, services)
+  - Optionally disables physical NICs if -IsolateNic
+  Notes: MUST run as Administrator. Script is written to avoid unhandled errors.
 #>
 
 [CmdletBinding()]
 param(
-  [string]$ProcessDisplayName = "Windows Font Utility",
-  [string]$AttackIP = "167.71.174.87",
-  [int]$AttackPort = 5555
+  [string]$ProcessDisplayName   = "Windows Font Utility",
+  [string]$AttackIP             = "167.71.174.87",
+  [int]   $AttackPort           = 5555,
+  [switch]$IsolateNic
 )
 
-Write-Host "=== STOP IT NOW: Starting containment & cleanup ==="
-
-# 0) Prep: logging + quarantine folder
-$TimeStamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$Log = "$env:PUBLIC\stop_redteam_$TimeStamp.log"
-Start-Transcript -Path $Log -Force | Out-Null
-
-$Quarantine = "C:\Quarantine_$TimeStamp"
-New-Item -ItemType Directory -Path $Quarantine -ErrorAction SilentlyContinue | Out-Null
-
-function Add-FirewallBlocks {
-  Write-Host "[FW] Adding firewall blocks for $AttackIP and port $AttackPort"
-  # Block outbound to attacker IP (any protocol/port)
-  New-NetFirewallRule -DisplayName "Block C2 IP $AttackIP [$TimeStamp]" `
-    -Direction Outbound -RemoteAddress $AttackIP -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
-
-  # Block inbound from attacker IP (defense in depth)
-  New-NetFirewallRule -DisplayName "Block C2 IP (Inbound) $AttackIP [$TimeStamp]" `
-    -Direction Inbound -RemoteAddress $AttackIP -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
-
-  # Explicitly block outbound TCP 5555 everywhere
-  New-NetFirewallRule -DisplayName "Block TCP 5555 [$TimeStamp]" `
-    -Direction Outbound -Protocol TCP -RemotePort $AttackPort -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
-}
-
-function Get-SuspiciousConns {
-  try {
-    return Get-NetTCPConnection -State Established -ErrorAction Stop `
-      | Where-Object { $_.RemoteAddress -eq $AttackIP -and $_.RemotePort -eq $AttackPort }
-  } catch { return @() }
-}
-
-function Get-PidsByNameOrConn {
-  $pids = New-Object System.Collections.Generic.HashSet[int]
-
-  # 1) Match by friendly display name / exe name (fuzzy contains)
-  $procsByName = Get-Process | Where-Object {
-    $_.ProcessName -like "*$($ProcessDisplayName -replace '\s','')*" -or
-    $_.Name -like "*$($ProcessDisplayName -replace '\s','')*"
+# ---------------------------
+# Helpers & setup
+# ---------------------------
+function Exit-If-NotAdmin {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "This script must be run as Administrator. Exiting." -ForegroundColor Red
+    exit 1
   }
-
-  # Also try exact window name match (rare, but helpful)
-  $procsByName += Get-Process | Where-Object { $_.MainWindowTitle -like "*$ProcessDisplayName*" }
-
-  foreach ($p in ($procsByName | Select-Object -Unique)) { [void]$pids.Add($p.Id) }
-
-  # 2) Match by active connection to attacker
-  $conns = Get-SuspiciousConns
-  foreach ($c in $conns) { [void]$pids.Add($c.OwningProcess) }
-
-  return $pids.ToArray()
 }
 
-function Get-ExePathFromPid($pid) {
+function SafeLog {
+  param([string]$Message)
+  $t = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+  $line = "$t`t$Message"
+  try { Add-Content -Path $Global:Log -Value $line -ErrorAction SilentlyContinue } catch {}
+  Write-Host $Message
+}
+
+# Ensure admin
+Exit-If-NotAdmin
+
+# Timestamped global log & transcript (best-effort)
+$ts = Get-Date -Format "yyyyMMdd_HHmmss"
+$Global:Log = "C:\Users\Public\stop_redteam_log_$ts.txt"
+try {
+  Start-Transcript -Path $Global:Log -ErrorAction SilentlyContinue | Out-Null
+} catch {
+  # if Start-Transcript fails (rare), continue with Add-Content logging
+}
+
+# Quarantine dir
+$QuarantineDir = "C:\Quarantine_$ts"
+try { New-Item -ItemType Directory -Path $QuarantineDir -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+SafeLog "=== Stop-RedTeam-NoErrors run started ==="
+
+# ---------------------------
+# 0) Export event logs (best-effort)
+# ---------------------------
+try {
+  $evDir = "C:\Users\Public\EventLogs_$ts"
+  New-Item -ItemType Directory -Path $evDir -ErrorAction SilentlyContinue | Out-Null
+  wevtutil epl System "$evDir\System.evtx" 2>$null
+  wevtutil epl Application "$evDir\Application.evtx" 2>$null
+  wevtutil epl Security "$evDir\Security.evtx" 2>$null
+  SafeLog "Event logs exported (best-effort) to $evDir"
+} catch {
+  SafeLog "Event log export encountered an error (continuing): $_"
+}
+
+# ---------------------------
+# 1) Idempotent firewall blocks (inbound + outbound + port)
+# ---------------------------
+function Add-FirewallBlock-Idempotent {
+  param($ip,$port)
   try {
-    $p = Get-Process -Id $pid -ErrorAction Stop
-    # Try .Path first; if null, fall back to WMI
-    if ($p.Path) { return $p.Path }
-    $w = Get-CimInstance Win32_Process -Filter "ProcessId=$pid"
-    return $w.ExecutablePath
-  } catch { return $null }
-}
+    # Check if a similar rule exists (by DisplayName pattern). If not, create.
+    $ruleNameOutIP = "Block_C2_IP_Out_$ip"
+    $ruleNameInIP  = "Block_C2_IP_In_$ip"
+    $ruleNameOutPort = "Block_TCP_Port_${port}_Out"
+    $ruleNameInPort  = "Block_TCP_Port_${port}_In"
 
-function Kill-Pids($pids) {
-  foreach ($pid in $pids) {
-    try {
-      $name = (Get-Process -Id $pid -ErrorAction Stop).ProcessName
-      Write-Host "[KILL] Stopping PID $pid ($name)"
-      Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-    } catch {
-      Write-Warning "[KILL] Could not stop PID $pid: $($_.Exception.Message)"
+    if (-not (Get-NetFirewallRule -DisplayName $ruleNameOutIP -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule -DisplayName $ruleNameOutIP -Direction Outbound -RemoteAddress $ip -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
     }
-  }
-}
+    if (-not (Get-NetFirewallRule -DisplayName $ruleNameInIP -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule -DisplayName $ruleNameInIP  -Direction Inbound  -RemoteAddress $ip -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (-not (Get-NetFirewallRule -DisplayName $ruleNameOutPort -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule -DisplayName $ruleNameOutPort -Direction Outbound -Protocol TCP -RemotePort $port -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (-not (Get-NetFirewallRule -DisplayName $ruleNameInPort -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule -DisplayName $ruleNameInPort -Direction Inbound -Protocol TCP -LocalPort $port -Action Block -Profile Any -ErrorAction SilentlyContinue | Out-Null
+    }
 
-function Quarantine-File($path) {
-  if (-not $path) { return }
-  if (-not (Test-Path $path)) { return }
-
-  # Compute hash & move to quarantine
-  try {
-    $hash = Get-FileHash -Algorithm SHA256 -Path $path -ErrorAction Stop
-    $base = Split-Path $path -Leaf
-    $qPath = Join-Path $Quarantine ($base + "_$($hash.Hash.Substring(0,12)).quar")
-    Write-Host "[QUAR] Moving $path -> $qPath"
-    # Clear attributes that might block move
-    attrib -r -h -s $path 2>$null
-    Move-Item -Path $path -Destination $qPath -Force
-    $qPath
+    SafeLog "Firewall: ensured blocks for IP $ip and TCP port $port."
   } catch {
-    Write-Warning "[QUAR] Failed to move $path: $($_.Exception.Message)"
-    $null
+    SafeLog "Firewall block step failed (continuing): $_"
+  }
+}
+Add-FirewallBlock-Idempotent -ip $AttackIP -port $AttackPort
+
+# ---------------------------
+# 2) Find established connections (Get-NetTCPConnection with fallback to netstat)
+# ---------------------------
+function Get-EstablishedConns {
+  param($ip,$port)
+  $result = @()
+  try {
+    $c = Get-NetTCPConnection -State Established -ErrorAction Stop | Where-Object {
+      ($_.RemoteAddress -eq $ip -or $_.RemoteAddress -eq "0.0.0.0") -and ($_.RemotePort -eq $port)
+    }
+    if ($c) { $result += $c }
+  } catch {
+    # fallback: parse netstat output
+    try {
+      $ns = netstat -ano -p tcp 2>$null
+      foreach ($line in $ns) {
+        if ($line -match "ESTABLISHED") {
+          # columns can be: Proto  Local Address  Foreign Address  State  PID
+          $parts = ($line -split '\s+') | Where-Object { $_ -ne "" }
+          if ($parts.Count -ge 5) {
+            $foreign = $parts[2]
+            $pid = $parts[-1]
+            # foreign format IP:port
+            if ($foreign -match "^(.*):(\d+)$") {
+              $fip = $matches[1]; $fport = [int]$matches[2]
+              if ($fip -eq $ip -and $fport -eq $port) {
+                # create a PSCustomObject-like entry similar to Get-NetTCPConnection
+                $obj = [PSCustomObject]@{ OwningProcess = [int]$pid; RemoteAddress = $fip; RemotePort = $fport; State = "ESTABLISHED" }
+                $result += $obj
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      SafeLog "netstat fallback failed: $_"
+    }
+  }
+  return $result
+}
+
+try {
+  $conns = Get-EstablishedConns -ip $AttackIP -port $AttackPort
+  if ($conns.Count -gt 0) {
+    SafeLog "Found $($conns.Count) established connection(s) to $AttackIP:$AttackPort"
+  } else {
+    SafeLog "No established connections to $AttackIP:$AttackPort found."
+  }
+} catch {
+  SafeLog "Connection enumeration failed (continuing): $_"
+  $conns = @()
+}
+
+# ---------------------------
+# 3) Build candidate PID list (from connections & name matching)
+# ---------------------------
+$pidSet = New-Object System.Collections.Generic.HashSet[int]
+
+# From connections
+try {
+  foreach ($c in $conns) { if ($c.OwningProcess) { $pidSet.Add([int]$c.OwningProcess) | Out-Null } }
+} catch { SafeLog "Error adding PIDs from conns: $_" }
+
+# From name match (fuzzy)
+try {
+  $pattern = ($ProcessDisplayName -replace '\s+','.*')
+  $procCandidates = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    ($_.ProcessName -match $pattern) -or ($_.MainWindowTitle -match [Regex]::Escape($ProcessDisplayName))
+  }
+  foreach ($p in $procCandidates) { $pidSet.Add($p.Id) | Out-Null }
+  SafeLog "Process name lookup added $($procCandidates.Count) candidates (may be zero)."
+} catch {
+  SafeLog "Process name lookup failed: $_"
+}
+
+$pids = @()
+try { $pids = $pidSet.ToArray() } catch {}
+
+if ($pids.Count -eq 0) {
+  SafeLog "No candidate PIDs collected (by connection or name)."
+} else {
+  SafeLog "Candidate PIDs: $($pids -join ', ')"
+}
+
+# ---------------------------
+# 4) For each PID: get exe path & hash (best-effort)
+# ---------------------------
+$suspectPaths = @()
+foreach ($pid in $pids) {
+  try {
+    $w = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+    $path = $null
+    if ($w -and $w.ExecutablePath) { $path = $w.ExecutablePath }
+    else {
+      try { $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue; if ($proc -and $proc.Path) { $path = $proc.Path } } catch {}
+    }
+    if ($path) {
+      if (-not ($suspectPaths -contains $path)) { $suspectPaths += $path }
+      try {
+        $h = Get-FileHash -Path $path -Algorithm SHA256 -ErrorAction SilentlyContinue
+        $hashStr = if ($h) { $h.Hash } else { "<hash-failed>" }
+      } catch { $hashStr = "<hash-failed>" }
+      SafeLog "PID $pid -> $path (SHA256: $hashStr)"
+    } else {
+      SafeLog "PID $pid -> executable path UNKNOWN (process may have exited)"
+    }
+  } catch {
+    SafeLog "Error enumerating PID $pid: $_"
   }
 }
 
-function Remove-Persistence($suspectPath) {
-
-  # 1) Scheduled Tasks (non-Microsoft and/or pointing at suspectPath)
-  Write-Host "[PERSIST] Checking Scheduled Tasks"
-  $tasks = schtasks /query /fo LIST /v 2>$null | Out-String
-  $taskBlocks = ($tasks -split "(\r?\n){2,}") | Where-Object {$_ -match "TaskName"}
-  foreach ($t in $taskBlocks) {
-    $name = ($t -split "`r?`n" | Where-Object {$_ -like "TaskName*"}).Replace("TaskName:","").Trim()
-    $action = ($t -split "`r?`n" | Where-Object {$_ -like "Actions*"})
-    $pathLine = ($t -split "`r?`n" | Where-Object {$_ -like "Task To Run*"} )
-
-    $isMicrosoft = ($name -like "\Microsoft\*")
-    $referencesSuspect = $false
-    if ($suspectPath -and $pathLine) { $referencesSuspect = ($pathLine -match [Regex]::Escape($suspectPath)) }
-
-    if (-not $isMicrosoft -or $referencesSuspect) {
-      try {
-        Write-Host "[PERSIST] Deleting task $name"
-        schtasks /Delete /TN $name /F | Out-Null
-      } catch { Write-Warning "[PERSIST] Could not delete task $name" }
+# ---------------------------
+# 5) Kill candidate processes (safe & best-effort)
+# ---------------------------
+foreach ($pid in $pids) {
+  try {
+    # double-check process exists before killing
+    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($proc) {
+      SafeLog "Stopping PID $pid ($($proc.ProcessName))"
+      Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 500
+      $still = Get-Process -Id $pid -ErrorAction SilentlyContinue
+      if (-not $still) { SafeLog "PID $pid stopped." } else { SafeLog "PID $pid could not be stopped or restarted rapidly." }
+    } else {
+      SafeLog "PID $pid not found (may have exited already)."
     }
+  } catch {
+    SafeLog "Failed to stop PID $pid (continuing): $_"
   }
+}
 
-  # 2) Run Keys (HKLM & HKCU) that reference suspectPath or look like the display name
-  $runPaths = @(
+# ---------------------------
+# 6) Quarantine discovered binaries (move if possible)
+# ---------------------------
+function Quarantine-File-Safe {
+  param($filePath)
+  if (-not $filePath) { return $null }
+  try {
+    if (-not (Test-Path $filePath)) { SafeLog "Quarantine: file does not exist: $filePath"; return $null }
+    try { attrib -r -h -s $filePath 2>$null } catch {}
+    $hf = Get-FileHash -Path $filePath -Algorithm SHA256 -ErrorAction SilentlyContinue
+    $hStr = if ($hf) { $hf.Hash.Substring(0,12) } else { "nohash" }
+    $leaf = Split-Path -Path $filePath -Leaf
+    $dest = Join-Path $QuarantineDir ("$($leaf)_$hStr")
+    try {
+      Move-Item -LiteralPath $filePath -Destination $dest -Force -ErrorAction Stop
+      SafeLog "Quarantined $filePath -> $dest"
+      return $dest
+    } catch {
+      SafeLog "Move-Item failed for $filePath: $_"
+      # try copy-and-delete fallback
+      try {
+        Copy-Item -LiteralPath $filePath -Destination $dest -Force -ErrorAction Stop
+        SafeLog "Copied $filePath -> $dest (delete original attempt)"
+        Remove-Item -LiteralPath $filePath -Force -ErrorAction SilentlyContinue
+        return $dest
+      } catch {
+        SafeLog "Copy/Delete fallback also failed for $filePath: $_"
+        return $null
+      }
+    }
+  } catch {
+    SafeLog "Quarantine-File-Safe encountered error for $filePath: $_"
+    return $null
+  }
+}
+
+$quarantined = @()
+foreach ($p in $suspectPaths) {
+  $q = Quarantine-File-Safe -filePath $p
+  if ($q) { $quarantined += $q }
+}
+if ($quarantined.Count -gt 0) {
+  SafeLog "Quarantined files: $($quarantined -join '; ')"
+} else {
+  SafeLog "No files quarantined (none discovered or move failed)."
+}
+
+# ---------------------------
+# 7) Remove likely persistence (scheduled tasks, Run keys, services) - best-effort
+# ---------------------------
+try {
+  # Scheduled tasks (skip Microsoft\ tasks)
+  try {
+    $taskDump = schtasks /query /fo LIST /v 2>$null | Out-String
+    $taskBlocks = ($taskDump -split "(\r?\n){2,}") | Where-Object { $_ -match "TaskName:" }
+    foreach ($block in $taskBlocks) {
+      try {
+        $taskNameLine = ($block -split "`r?`n" | Where-Object { $_ -like "TaskName:*" })[0]
+        if (-not $taskNameLine) { continue }
+        $taskName = $taskNameLine -replace "TaskName:","" -trim
+        if ($taskName -match "\\Microsoft\\") { continue }
+        $taskAction = ($block -split "`r?`n" | Where-Object { $_ -like "Task To Run:*" }) -join " "
+        $shouldDelete = $false
+        if ($taskAction -match [Regex]::Escape($ProcessDisplayName)) { $shouldDelete = $true }
+        foreach ($s in $suspectPaths) { if ($taskAction -match [Regex]::Escape($s)) { $shouldDelete = $true } }
+        if ($shouldDelete) {
+          SafeLog "Deleting scheduled task $taskName (action: $taskAction)"
+          schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+        }
+      } catch { SafeLog "Scheduled task sub-step error: $_"; continue }
+    }
+  } catch { SafeLog "Scheduled tasks enumeration failed: $_" }
+
+  # Run keys
+  $runKeys = @(
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
   )
-  foreach ($rk in $runPaths) {
+  foreach ($rk in $runKeys) {
     try {
-      $values = Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue
-      if ($values) {
-        foreach ($pn in $values.PSObject.Properties) {
-          if ($pn.Name -eq "PSPath" -or $pn.Name -eq "PSParentPath" -or $pn.Name -eq "PSChildName" -or $pn.Name -eq "PSDrive" -or $pn.Name -eq "PSProvider") { continue }
-          $val = [string]$pn.Value
-          if (($suspectPath -and $val -match [Regex]::Escape($suspectPath)) -or ($val -match "Windows\s*Font\s*Utility")) {
-            Write-Host "[PERSIST] Removing Run entry $($pn.Name) in $rk"
-            Remove-ItemProperty -Path $rk -Name $pn.Name -Force -ErrorAction SilentlyContinue
+      $vals = Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue
+      if ($vals) {
+        foreach ($prop in $vals.PSObject.Properties) {
+          if ($prop.Name -in @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider")) { continue }
+          $v = [string]$prop.Value
+          $remove = $false
+          if ($v -match [Regex]::Escape($ProcessDisplayName)) { $remove = $true }
+          foreach ($s in $suspectPaths) { if ($v -match [Regex]::Escape($s)) { $remove = $true } }
+          if ($remove) {
+            try {
+              Remove-ItemProperty -Path $rk -Name $prop.Name -ErrorAction SilentlyContinue
+              SafeLog "Removed Run entry $($prop.Name) from $rk -> $v"
+            } catch { SafeLog "Failed to remove Run entry $($prop.Name) from $rk: $_" }
           }
         }
       }
-    } catch { }
+    } catch { SafeLog "Run key read error for $rk: $_" }
   }
 
-  # 3) Services with suspicious display name or pointing to suspectPath
-  Write-Host "[PERSIST] Checking Services"
-  $svcs = Get-CimInstance Win32_Service
-  foreach ($svc in $svcs) {
-    $isMatch = $false
-    if ($svc.DisplayName -match "Windows\s*Font\s*Utility") { $isMatch = $true }
-    if ($suspectPath -and $svc.PathName -and ($svc.PathName -match [Regex]::Escape($suspectPath))) { $isMatch = $true }
-
-    if ($isMatch) {
+  # Services
+  try {
+    $services = Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue
+    foreach ($svc in $services) {
+      $match = $false
       try {
-        Write-Host "[PERSIST] Disabling & deleting service: $($svc.Name) ($($svc.DisplayName))"
-        sc.exe stop $($svc.Name) | Out-Null
-        sc.exe config $($svc.Name) start= disabled | Out-Null
-        sc.exe delete $($svc.Name) | Out-Null
-      } catch { Write-Warning "[PERSIST] Failed to delete service $($svc.Name)" }
+        if ($svc.DisplayName -match $ProcessDisplayName) { $match = $true }
+        foreach ($s in $suspectPaths) { if ($svc.PathName -and ($svc.PathName -match [Regex]::Escape($s))) { $match = $true } }
+      } catch {}
+      if ($match) {
+        SafeLog "Attempting to disable/delete service: $($svc.Name) ($($svc.DisplayName)) Path: $($svc.PathName)"
+        try { sc.exe stop $svc.Name 2>$null | Out-Null } catch {}
+        try { sc.exe config $svc.Name start= disabled 2>$null | Out-Null } catch {}
+        try { sc.exe delete $svc.Name 2>$null | Out-Null } catch {}
+      }
     }
+  } catch { SafeLog "Service cleanup step failed: $_" }
+
+} catch {
+  SafeLog "Persistence cleanup encountered an error (continuing): $_"
+}
+
+# ---------------------------
+# 8) Final connection check
+# ---------------------------
+try {
+  $still = Get-EstablishedConns -ip $AttackIP -port $AttackPort
+  if ($still.Count -gt 0) {
+    SafeLog "WARNING: $($still.Count) connections to $AttackIP:$AttackPort still active. Consider hypervisor-level power-off or NIC isolation."
+  } else {
+    SafeLog "No active connections to $AttackIP:$AttackPort detected."
   }
+} catch { SafeLog "Final connection check error: $_" }
+
+# ---------------------------
+# 9) Optional NIC isolation (physical adapters) - safe attempt
+# ---------------------------
+if ($IsolateNic) {
+  try {
+    $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
+    if ($adapters.Count -eq 0) { SafeLog "No physical 'Up' adapters found to disable." }
+    foreach ($a in $adapters) {
+      try {
+        SafeLog "Disabling adapter: $($a.Name)"
+        Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+      } catch { SafeLog "Failed to disable adapter $($a.Name): $_" }
+    }
+    SafeLog "NIC isolation attempted (physical adapters)."
+  } catch { SafeLog "NIC isolation failed: $_" }
 }
 
-# 1) Block C2 immediately
-Add-FirewallBlocks
+# ---------------------------
+# 10) Wrap up
+# ---------------------------
+SafeLog "Manual follow-ups: rotate credentials from a CLEAN machine, rebuild VM from known-good image, submit samples if needed, involve IR if sensitive data involved."
+SafeLog "Script finished. Log file: $Global:Log"
 
-# 2) Identify PIDs by name/connection
-$pids = Get-PidsByNameOrConn
-if ($pids.Count -eq 0) {
-  Write-Warning "[FIND] No process matched by name or active connection. (It may have exited already.)"
-} else {
-  Write-Host "[FIND] Candidate PIDs: $($pids -join ', ')"
-}
-
-# 3) Collect paths for quarantine BEFORE killing (if possible)
-$suspectPaths = @()
-foreach ($pid in $pids) {
-  $p = Get-ExePathFromPid $pid
-  if ($p -and -not $suspectPaths.Contains($p)) { $suspectPaths += $p }
-}
-
-# 4) Kill processes
-if ($pids.Count -gt 0) { Kill-Pids $pids }
-
-# 5) Quarantine binaries (move to C:\Quarantine_* and hash them)
-$quarantined = @()
-foreach ($sp in $suspectPaths) {
-  $q = Quarantine-File $sp
-  if ($q) { $quarantined += $q }
-}
-
-# 6) Persistence cleanup (tasks, run keys, services)
-# Prefer to use ORIGINAL paths when available; also search by display name pattern.
-$primaryPath = $suspectPaths | Select-Object -First 1
-Remove-Persistence -suspectPath $primaryPath
-
-# 7) Double-check for any still-open connections to the C2
-Start-Sleep -Seconds 2
-$stillConns = Get-SuspiciousConns
-if ($stillConns.Count -gt 0) {
-  Write-Warning "[CHECK] There are still connections to $AttackIP:$AttackPort. Consider fully isolating the NIC:"
-  Write-Host '  Disable-NetAdapter -Name "Ethernet" -Confirm:$false'
-} else {
-  Write-Host "[CHECK] No active connections to $AttackIP:$AttackPort detected."
-}
-
-Write-Host "`n=== Done. Log: $Log"
-if ($quarantined.Count -gt 0) {
-  Write-Host "Quarantined files:"
-  $quarantined | ForEach-Object { Write-Host " - $_" }
-}
-Stop-Transcript | Out-Null
+try { Stop-Transcript -ErrorAction SilentlyContinue } catch {}
