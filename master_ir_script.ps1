@@ -122,7 +122,15 @@ function Secure-Users {
     foreach ($admin in $adminGroup) {
         Log-Action "    - $($admin.Name)"
         $adminUsername = $admin.Name.Split('\')[-1]
-        if ($AuthorizedLocalUsers -notcontains $adminUsername -and $admin.Name -notlike "*Administrator" -and $adminUsername -ne "Administrator") {
+        
+        # Skip system accounts and domain groups
+        $shouldSkip = ($adminUsername -eq "Administrator") -or ($admin.Name -like "*\Administrator") -or ($admin.Name -like "*\Domain Admins") -or ($adminUsername -eq "Domain Admins")
+        
+        if ($shouldSkip) {
+            continue
+        }
+        
+        if ($AuthorizedLocalUsers -notcontains $adminUsername) {
             $unauthorizedAdmins += $admin.Name
         }
     }
@@ -572,7 +580,7 @@ switch -Wildcard ($hostname) {
     }
 }
 
-# Run common checks on all machines
+# ==================== MACHINE-SPECIFIC CONFIGURATIONS ====================
 Check-Persistence
 Check-Network
 
