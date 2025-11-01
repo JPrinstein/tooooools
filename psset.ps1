@@ -1,9 +1,9 @@
 # Prompt once for new password
 $newPassword = Read-Host "Enter the new password for all users" -AsSecureString
 
-# Get all local users except Administrator and Guest
+# Get all local users except Administrator, Guest, and WhiteTeam
 $users = Get-LocalUser | Where-Object {
-    $_.Name -ne "Administrator" -and $_.Name -ne "Guest"
+    $_.Name -ne "Administrator" -and $_.Name -ne "Guest" -and $_.Name -ne "whiteteam user"
 }
 
 Write-Host "`nChanging password for all local users..." -ForegroundColor Cyan
@@ -17,4 +17,4 @@ foreach ($user in $users) {
     }
 }
 
-Write-Host "`nDone! Password updated for all users." -ForegroundColor Cyan
+Write-Host "`nDone! Password updated for all users (excluding WhiteTeam)." -ForegroundColor Cyan
