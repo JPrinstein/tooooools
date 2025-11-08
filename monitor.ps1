@@ -25,7 +25,7 @@ function Send-Alert {
 }
 
 function Get-CurrentState {
-    Write-Host "`nCollecting current system state..." -ForegroundColor Cyan
+    Write-Host "`nCollecting current system state" -ForegroundColor Cyan
     
     $state = @{
         Timestamp = $timestamp
@@ -40,7 +40,7 @@ function Get-CurrentState {
     }
     
     # Collect Users
-    Write-Host "  - Collecting users..." -ForegroundColor DarkGray
+    Write-Host "- Collecting users" -ForegroundColor DarkGray
     $users = Get-LocalUser
     foreach ($user in $users) {
         $state.Users += @{
@@ -49,20 +49,20 @@ function Get-CurrentState {
             PasswordLastSet = if ($user.PasswordLastSet) { $user.PasswordLastSet.ToString('yyyy-MM-dd HH:mm:ss') } else { "Never" }
         }
     }
-    Write-Host "    Found $($state.Users.Count) users" -ForegroundColor DarkGray
+    Write-Host "Found $($state.Users.Count) users" -ForegroundColor DarkGray
     
     # Collect Administrators
-    Write-Host "  - Collecting administrators..." -ForegroundColor DarkGray
+    Write-Host "- Collecting administrators" -ForegroundColor DarkGray
     try {
         $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
         $state.Administrators = @($admins | ForEach-Object { $_.Name })
     } catch {
         $state.Administrators = @()
     }
-    Write-Host "    Found $($state.Administrators.Count) administrators" -ForegroundColor DarkGray
+    Write-Host "Found $($state.Administrators.Count) administrators" -ForegroundColor DarkGray
     
     # Collect Service Status (for monitored services)
-    Write-Host "  - Collecting services..." -ForegroundColor DarkGray
+    Write-Host "- Collecting services" -ForegroundColor DarkGray
     $servicesToCheck = @("DNS", "NTDS", "Netlogon", "WinRM", "LanmanServer", "W3SVC", "WAS", "Spooler")
     foreach ($svcName in $servicesToCheck) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -73,10 +73,10 @@ function Get-CurrentState {
             }
         }
     }
-    Write-Host "    Monitoring $($state.Services.Count) services" -ForegroundColor DarkGray
+    Write-Host "Monitoring $($state.Services.Count) services" -ForegroundColor DarkGray
     
     # Collect Firewall Profiles
-    Write-Host "  - Collecting firewall profiles..." -ForegroundColor DarkGray
+    Write-Host "- Collecting firewall profiles..." -ForegroundColor DarkGray
     $profiles = Get-NetFirewallProfile
     foreach ($profile in $profiles) {
         $state.FirewallProfiles[$profile.Name] = @{
@@ -85,10 +85,10 @@ function Get-CurrentState {
             DefaultOutboundAction = $profile.DefaultOutboundAction.ToString()
         }
     }
-    Write-Host "    Found $($state.FirewallProfiles.Count) profiles" -ForegroundColor DarkGray
+    Write-Host "Found $($state.FirewallProfiles.Count) profiles" -ForegroundColor DarkGray
     
     # Collect Firewall Rules (only enabled ones)
-    Write-Host "  - Collecting firewall rules..." -ForegroundColor DarkGray
+    Write-Host "- Collecting firewall rules..." -ForegroundColor DarkGray
     $rules = Get-NetFirewallRule | Where-Object {$_.Enabled -eq $true}
     foreach ($rule in $rules) {
         $state.FirewallRules += @{
@@ -98,10 +98,10 @@ function Get-CurrentState {
             Action = $rule.Action.ToString()
         }
     }
-    Write-Host "    Found $($state.FirewallRules.Count) enabled rules" -ForegroundColor DarkGray
+    Write-Host "Found $($state.FirewallRules.Count) enabled rules" -ForegroundColor DarkGray
     
     # Collect Suspicious Processes - FIXED patterns to avoid false positives
-    Write-Host "  - Scanning for suspicious processes..." -ForegroundColor DarkGray
+    Write-Host "- Scanning for suspicious processes" -ForegroundColor DarkGray
     $suspiciousPatterns = @(
         "^nc$", "^nc\.exe$", "ncat", "netcat", "powercat", 
         "mimikatz", "psexec", "procdump", "cobalt", "meterpreter", "empire"
@@ -137,10 +137,10 @@ function Get-CurrentState {
             }
         }
     }
-    Write-Host "    Found $($state.Processes.Count) suspicious processes" -ForegroundColor DarkGray
+    Write-Host "Found $($state.Processes.Count) suspicious processes" -ForegroundColor DarkGray
     
     # Collect External Connections (exclude private ranges)
-    Write-Host "  - Collecting external connections..." -ForegroundColor DarkGray
+    Write-Host "- Collecting external connections" -ForegroundColor DarkGray
     $connections = Get-NetTCPConnection | Where-Object {$_.State -eq "Established"}
     foreach ($conn in $connections) {
         $isPrivate = $false
@@ -165,7 +165,7 @@ function Get-CurrentState {
             }
         }
     }
-    Write-Host "    Found $($state.Connections.Count) external connections" -ForegroundColor DarkGray
+    Write-Host "Found $($state.Connections.Count) external connections" -ForegroundColor DarkGray
     
     return $state
 }
@@ -189,8 +189,8 @@ function Compare-States {
     $newUserNames = @($NewState.Users | ForEach-Object { $_.Name })
     
     if ($Debug) {
-        Write-Host "  DEBUG: Old users: $($oldUserNames -join ', ')" -ForegroundColor DarkYellow
-        Write-Host "  DEBUG: New users: $($newUserNames -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: Old users: $($oldUserNames -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: New users: $($newUserNames -join ', ')" -ForegroundColor DarkYellow
     }
     
     # Check for new users
@@ -232,7 +232,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No user changes detected" -ForegroundColor Gray
+        Write-Host "No user changes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -244,8 +244,8 @@ function Compare-States {
     $newAdmins = @($NewState.Administrators)
     
     if ($Debug) {
-        Write-Host "  DEBUG: Old admins: $($oldAdmins -join ', ')" -ForegroundColor DarkYellow
-        Write-Host "  DEBUG: New admins: $($newAdmins -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: Old admins: $($oldAdmins -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: New admins: $($newAdmins -join ', ')" -ForegroundColor DarkYellow
     }
     
     # Check for new admins
@@ -265,7 +265,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No administrator changes detected" -ForegroundColor Gray
+        Write-Host "No administrator changes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -277,7 +277,7 @@ function Compare-States {
     $oldServiceNames = @($OldState.Services.Keys)
     
     if ($Debug) {
-        Write-Host "  DEBUG: Comparing services: $($newServiceNames -join ', ')" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: Comparing services: $($newServiceNames -join ', ')" -ForegroundColor DarkYellow
     }
     
     foreach ($serviceName in $newServiceNames) {
@@ -286,7 +286,7 @@ function Compare-States {
             $newSvc = $NewState.Services[$serviceName]
             
             if ($Debug) {
-                Write-Host "  DEBUG: $serviceName - Old: $($oldSvc.Status)/$($oldSvc.StartType) New: $($newSvc.Status)/$($newSvc.StartType)" -ForegroundColor DarkYellow
+                Write-Host "DEBUG: $serviceName - Old: $($oldSvc.Status)/$($oldSvc.StartType) New: $($newSvc.Status)/$($newSvc.StartType)" -ForegroundColor DarkYellow
             }
             
             if ($newSvc.Status -ne $oldSvc.Status) {
@@ -302,7 +302,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No service changes detected" -ForegroundColor Gray
+        Write-Host "No service changes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -316,8 +316,8 @@ function Compare-States {
             $newProfile = $NewState.FirewallProfiles[$profileName]
             
             if ($Debug) {
-                Write-Host "  DEBUG: $profileName - Old Enabled: $($oldProfile.Enabled), New Enabled: $($newProfile.Enabled)" -ForegroundColor DarkYellow
-                Write-Host "  DEBUG: $profileName - Old Inbound: $($oldProfile.DefaultInboundAction), New Inbound: $($newProfile.DefaultInboundAction)" -ForegroundColor DarkYellow
+                Write-Host "DEBUG: $profileName - Old Enabled: $($oldProfile.Enabled), New Enabled: $($newProfile.Enabled)" -ForegroundColor DarkYellow
+                Write-Host "DEBUG: $profileName - Old Inbound: $($oldProfile.DefaultInboundAction), New Inbound: $($newProfile.DefaultInboundAction)" -ForegroundColor DarkYellow
             }
             
             if ($newProfile.Enabled -ne $oldProfile.Enabled) {
@@ -339,7 +339,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No firewall profile changes detected" -ForegroundColor Gray
+        Write-Host "No firewall profile changes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -351,8 +351,8 @@ function Compare-States {
     $newRuleNames = @($NewState.FirewallRules | ForEach-Object { $_.Name })
     
     if ($Debug) {
-        Write-Host "  DEBUG: Old rule count: $($oldRuleNames.Count)" -ForegroundColor DarkYellow
-        Write-Host "  DEBUG: New rule count: $($newRuleNames.Count)" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: Old rule count: $($oldRuleNames.Count)" -ForegroundColor DarkYellow
+        Write-Host "DEBUG: New rule count: $($newRuleNames.Count)" -ForegroundColor DarkYellow
     }
     
     # Check for new rules
@@ -374,7 +374,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No firewall rule changes detected" -ForegroundColor Gray
+        Write-Host "No firewall rule changes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -390,7 +390,7 @@ function Compare-States {
     }
     
     if ($sectionAlerts -eq 0) {
-        Write-Host "  No suspicious processes detected" -ForegroundColor Gray
+        Write-Host "No suspicious processes detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
@@ -411,13 +411,13 @@ function Compare-States {
                 Send-Alert "NEW EXTERNAL CONNECTION: $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process) (PID: $($conn.ProcessId))" "WARNING"
                 $sectionAlerts++
             } else {
-                Write-Host "  [Existing] $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process)" -ForegroundColor DarkGray
+                Write-Host "[Existing] $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process)" -ForegroundColor DarkGray
             }
         }
     }
     
     if ($sectionAlerts -eq 0 -and $NewState.Connections.Count -eq 0) {
-        Write-Host "  No external connections detected" -ForegroundColor Gray
+        Write-Host "No external connections detected" -ForegroundColor Gray
     }
     $totalAlerts += $sectionAlerts
     
