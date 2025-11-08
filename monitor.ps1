@@ -1,4 +1,4 @@
-# Snapshot-Based Security Monitor
+# Snapshot-Based Security Monitor - FIXED VERSION
 # Run this periodically instead of continuously
 # Saves state to file, compares on next run
 
@@ -53,7 +53,7 @@ function Get-CurrentState {
     
     # Collect Administrators
     try {
-        $state.Administrators = (Get-LocalGroupMember -Group "Administrators").Name
+        $state.Administrators = @(Get-LocalGroupMember -Group "Administrators" | Select-Object -ExpandProperty Name)
     } catch {
         $state.Administrators = @()
     }
@@ -70,15 +70,17 @@ function Get-CurrentState {
         }
     }
     
+    # Collect Firewall Profiles
     $profiles = Get-NetFirewallProfile
     foreach ($profile in $profiles) {
         $state.FirewallProfiles[$profile.Name] = @{
-            Enabled = [bool]$profile.Enabled
+            Enabled = $profile.Enabled
             DefaultInboundAction = $profile.DefaultInboundAction.ToString()
             DefaultOutboundAction = $profile.DefaultOutboundAction.ToString()
         }
     }
     
+    # Collect Firewall Rules
     $state.FirewallRules = Get-NetFirewallRule | Where-Object {$_.Enabled -eq $true} | ForEach-Object {
         @{
             Name = $_.Name
@@ -88,20 +90,36 @@ function Get-CurrentState {
         }
     }
     
-    $suspiciousNames = @("nc", "ncat", "netcat", "powercat", "mimikatz", "psexec", "procdump", "cobalt", "meterpreter", "empire")
+    # Collect Suspicious Processes - FIXED patterns to avoid false positives
+    $suspiciousNames = @("nc.exe", "ncat", "netcat", "powercat", "mimikatz", "psexec", "procdump", "cobalt", "meterpreter", "empire", "^nc$")
     $processes = Get-Process
     foreach ($proc in $processes) {
         foreach ($suspicious in $suspiciousNames) {
-            if ($proc.Name -like "*$suspicious*") {
+            # Exact match or contains pattern, but exclude common Windows processes
+            $excludeList = @("svchost", "RuntimeBroker", "ShellExperienceHost", "StartMenuExperienceHost", 
+                           "PhoneExperienceHost", "SearchHost", "TextInputHost", "SecurityHealthService",
+                           "OneDrive", "conhost", "fontdrvhost")
+            
+            $isExcluded = $false
+            foreach ($exclude in $excludeList) {
+                if ($proc.Name -like "*$exclude*") {
+                    $isExcluded = $true
+                    break
+                }
+            }
+            
+            if (-not $isExcluded -and $proc.Name -like "*$suspicious*") {
                 $state.Processes += @{
                     Name = $proc.Name
                     Id = $proc.Id
                     Path = if ($proc.Path) { $proc.Path } else { "Unknown" }
                 }
+                break  # Don't add same process multiple times
             }
         }
     }
     
+    # Collect External Connections
     $connections = Get-NetTCPConnection | Where-Object {$_.State -eq "Established"}
     foreach ($conn in $connections) {
         if ($conn.RemoteAddress -notlike "127.*" -and 
@@ -109,7 +127,21 @@ function Get-CurrentState {
             $conn.RemoteAddress -notlike "10.*" -and
             $conn.RemoteAddress -notlike "192.168.*" -and
             $conn.RemoteAddress -notlike "172.16.*" -and
-            $conn.RemoteAddress -notlike "172.20.*") {
+            $conn.RemoteAddress -notlike "172.17.*" -and
+            $conn.RemoteAddress -notlike "172.18.*" -and
+            $conn.RemoteAddress -notlike "172.19.*" -and
+            $conn.RemoteAddress -notlike "172.20.*" -and
+            $conn.RemoteAddress -notlike "172.21.*" -and
+            $conn.RemoteAddress -notlike "172.22.*" -and
+            $conn.RemoteAddress -notlike "172.23.*" -and
+            $conn.RemoteAddress -notlike "172.24.*" -and
+            $conn.RemoteAddress -notlike "172.25.*" -and
+            $conn.RemoteAddress -notlike "172.26.*" -and
+            $conn.RemoteAddress -notlike "172.27.*" -and
+            $conn.RemoteAddress -notlike "172.28.*" -and
+            $conn.RemoteAddress -notlike "172.29.*" -and
+            $conn.RemoteAddress -notlike "172.30.*" -and
+            $conn.RemoteAddress -notlike "172.31.*") {
             
             $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
             $state.Connections += @{
@@ -117,6 +149,7 @@ function Get-CurrentState {
                 RemotePort = $conn.RemotePort
                 LocalPort = $conn.LocalPort
                 Process = if ($proc) { $proc.Name } else { "Unknown" }
+                ProcessId = $conn.OwningProcess
             }
         }
     }
@@ -127,16 +160,19 @@ function Get-CurrentState {
 function Compare-States {
     param($OldState, $NewState)
     
-    Write-Host "`nCOMPARISON" -ForegroundColor Cyan
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "COMPARISON RESULTS" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "Previous: $($OldState.Timestamp)" -ForegroundColor Yellow
     Write-Host "Current:  $($NewState.Timestamp)" -ForegroundColor Yellow
     
     $changesFound = $false
     
-    Write-Host "`nUSER CHANGES" -ForegroundColor Green
+    # USER CHANGES
+    Write-Host "`n[USER CHANGES]" -ForegroundColor Green
     
-    $oldUserNames = $OldState.Users | ForEach-Object { $_.Name }
-    $newUserNames = $NewState.Users | ForEach-Object { $_.Name }
+    $oldUserNames = @($OldState.Users | ForEach-Object { $_.Name })
+    $newUserNames = @($NewState.Users | ForEach-Object { $_.Name })
     
     $addedUsers = $newUserNames | Where-Object {$_ -notin $oldUserNames}
     foreach ($user in $addedUsers) {
@@ -175,16 +211,20 @@ function Compare-States {
         Write-Host "  No user changes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nADMINISTRATOR CHANGES" -ForegroundColor Green
+    # ADMINISTRATOR CHANGES
+    Write-Host "`n[ADMINISTRATOR CHANGES]" -ForegroundColor Green
     $changesFound = $false
     
-    $addedAdmins = $NewState.Administrators | Where-Object {$_ -notin $OldState.Administrators}
+    $oldAdmins = @($OldState.Administrators)
+    $newAdmins = @($NewState.Administrators)
+    
+    $addedAdmins = $newAdmins | Where-Object {$_ -notin $oldAdmins}
     foreach ($admin in $addedAdmins) {
         Send-Alert "NEW ADMINISTRATOR: $admin" "CRITICAL"
         $changesFound = $true
     }
     
-    $removedAdmins = $OldState.Administrators | Where-Object {$_ -notin $NewState.Administrators}
+    $removedAdmins = $oldAdmins | Where-Object {$_ -notin $newAdmins}
     foreach ($admin in $removedAdmins) {
         Send-Alert "ADMINISTRATOR REMOVED: $admin" "WARNING"
         $changesFound = $true
@@ -194,17 +234,18 @@ function Compare-States {
         Write-Host "  No administrator changes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nSERVICE CHANGES" -ForegroundColor Green
+    # SERVICE CHANGES
+    Write-Host "`n[SERVICE CHANGES]" -ForegroundColor Green
     $changesFound = $false
     
-    # Check for new or removed services
-    $newServiceNames = $NewState.Services.Keys
-    $oldServiceNames = $OldState.Services.PSObject.Properties.Name
+    # Get service names from both states
+    $newServiceNames = @($NewState.Services.Keys)
+    $oldServiceNames = @($OldState.Services.Keys)
     
     foreach ($serviceName in $newServiceNames) {
         if ($serviceName -in $oldServiceNames) {
-            $oldSvc = $OldState.Services.$serviceName
-            $newSvc = $NewState.Services.$serviceName
+            $oldSvc = $OldState.Services[$serviceName]
+            $newSvc = $NewState.Services[$serviceName]
             
             if ($newSvc.Status -ne $oldSvc.Status) {
                 Send-Alert "SERVICE STATUS CHANGED: $serviceName from $($oldSvc.Status) to $($newSvc.Status)" "WARNING"
@@ -222,22 +263,16 @@ function Compare-States {
         Write-Host "  No service changes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nFIREWALL PROFILE CHANGES" -ForegroundColor Green
-    $changesFound = $false
-    
-    Write-Host "`nFIREWALL PROFILE CHANGES" -ForegroundColor Green
+    # FIREWALL PROFILE CHANGES
+    Write-Host "`n[FIREWALL PROFILE CHANGES]" -ForegroundColor Green
     $changesFound = $false
     
     foreach ($profileName in $NewState.FirewallProfiles.Keys) {
-        if ($OldState.FirewallProfiles.PSObject.Properties.Name -contains $profileName) {
-            $oldProfile = $OldState.FirewallProfiles.$profileName
-            $newProfile = $NewState.FirewallProfiles.$profileName
+        if ($OldState.FirewallProfiles.ContainsKey($profileName)) {
+            $oldProfile = $OldState.FirewallProfiles[$profileName]
+            $newProfile = $NewState.FirewallProfiles[$profileName]
             
-            # Convert boolean to string for comparison
-            $oldEnabled = $oldProfile.Enabled.ToString()
-            $newEnabled = $newProfile.Enabled.ToString()
-            
-            if ($newEnabled -ne $oldEnabled) {
+            if ($newProfile.Enabled -ne $oldProfile.Enabled) {
                 $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
                 Send-Alert "FIREWALL PROFILE $status`: $profileName" "CRITICAL"
                 $changesFound = $true
@@ -259,11 +294,12 @@ function Compare-States {
         Write-Host "  No firewall profile changes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nFIREWALL RULE CHANGES" -ForegroundColor Green
+    # FIREWALL RULE CHANGES
+    Write-Host "`n[FIREWALL RULE CHANGES]" -ForegroundColor Green
     $changesFound = $false
     
-    $oldRuleNames = $OldState.FirewallRules | ForEach-Object { $_.Name }
-    $newRuleNames = $NewState.FirewallRules | ForEach-Object { $_.Name }
+    $oldRuleNames = @($OldState.FirewallRules | ForEach-Object { $_.Name })
+    $newRuleNames = @($NewState.FirewallRules | ForEach-Object { $_.Name })
     
     $addedRules = $newRuleNames | Where-Object {$_ -notin $oldRuleNames}
     foreach ($ruleName in $addedRules) {
@@ -283,7 +319,8 @@ function Compare-States {
         Write-Host "  No firewall rule changes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nSUSPICIOUS PROCESSES" -ForegroundColor Green
+    # SUSPICIOUS PROCESSES
+    Write-Host "`n[SUSPICIOUS PROCESSES]" -ForegroundColor Green
     $changesFound = $false
     
     if ($NewState.Processes.Count -gt 0) {
@@ -297,7 +334,8 @@ function Compare-States {
         Write-Host "  No suspicious processes detected" -ForegroundColor Gray
     }
     
-    Write-Host "`nEXTERNAL CONNECTIONS" -ForegroundColor Green
+    # EXTERNAL CONNECTIONS
+    Write-Host "`n[EXTERNAL CONNECTIONS]" -ForegroundColor Green
     $changesFound = $false
     
     if ($NewState.Connections.Count -gt 0) {
@@ -305,15 +343,16 @@ function Compare-States {
             # Check if this connection existed before
             $existed = $OldState.Connections | Where-Object {
                 $_.RemoteAddress -eq $conn.RemoteAddress -and 
-                $_.RemotePort -eq $conn.RemotePort
+                $_.RemotePort -eq $conn.RemotePort -and
+                $_.Process -eq $conn.Process
             }
             
             if (-not $existed) {
-                Send-Alert "NEW EXTERNAL CONNECTION: $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process)" "WARNING"
+                Send-Alert "NEW EXTERNAL CONNECTION: $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process) (PID: $($conn.ProcessId))" "WARNING"
                 $changesFound = $true
             } else {
                 # Connection still exists, just note it
-                Write-Host "  [Existing] $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process)" -ForegroundColor Gray
+                Write-Host "  [Existing] $($conn.RemoteAddress):$($conn.RemotePort) by $($conn.Process)" -ForegroundColor DarkGray
             }
         }
     }
@@ -324,7 +363,7 @@ function Compare-States {
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "SNAPSHOT-BASED SECURITY MONITOR" -ForegroundColor Cyan
+Write-Host "SNAPSHOT-BASED SECURITY MONITOR v2" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Machine: $hostname" -ForegroundColor Cyan
 Write-Host "Time: $timestamp" -ForegroundColor Cyan
@@ -339,17 +378,34 @@ if (Test-Path $StateFile) {
     try {
         $previousStateJson = Get-Content $StateFile -Raw | ConvertFrom-Json
         
-        # Convert JSON back to proper hashtables
+        # Convert JSON back to proper hashtables with proper array handling
         $oldState = @{
             Timestamp = $previousStateJson.Timestamp
             Hostname = $previousStateJson.Hostname
             Users = @($previousStateJson.Users)
             Administrators = @($previousStateJson.Administrators)
-            Services = $previousStateJson.Services
-            FirewallProfiles = $previousStateJson.FirewallProfiles
+            Services = @{}
+            FirewallProfiles = @{}
             FirewallRules = @($previousStateJson.FirewallRules)
             Processes = @($previousStateJson.Processes)
             Connections = @($previousStateJson.Connections)
+        }
+        
+        # Rebuild Services hashtable
+        foreach ($prop in $previousStateJson.Services.PSObject.Properties) {
+            $oldState.Services[$prop.Name] = @{
+                Status = $prop.Value.Status
+                StartType = $prop.Value.StartType
+            }
+        }
+        
+        # Rebuild FirewallProfiles hashtable
+        foreach ($prop in $previousStateJson.FirewallProfiles.PSObject.Properties) {
+            $oldState.FirewallProfiles[$prop.Name] = @{
+                Enabled = $prop.Value.Enabled
+                DefaultInboundAction = $prop.Value.DefaultInboundAction
+                DefaultOutboundAction = $prop.Value.DefaultOutboundAction
+            }
         }
         
         # Compare states
@@ -373,7 +429,7 @@ try {
     Write-Host "`nError saving state: $_" -ForegroundColor Red
 }
 
-Write-Host "`nAlerts logged to: C:\SecurityMonitor_Alerts.log" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "Alerts logged to: C:\SecurityMonitor_Alerts.log" -ForegroundColor Cyan
 Write-Host "Monitoring complete. Run again to check for new changes." -ForegroundColor Green
 Write-Host "========================================`n" -ForegroundColor Cyan
