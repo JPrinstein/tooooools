@@ -130,23 +130,13 @@ function Secure-Users {
         foreach ($admin in $unauthorizedAdmins) {
             Write-Host "`n" -ForegroundColor Cyan
             Write-Host "Admin: $($admin.Name)" -ForegroundColor Yellow
-            Write-Host "1 = Remove from Administrators group" -ForegroundColor Green
-            Write-Host "2 = Disable user account" -ForegroundColor Yellow
+            Write-Host "1 = Disable user account" -ForegroundColor Yellow
+            Write-Host "2 = Remove from Administrators group" -ForegroundColor Green
             Write-Host "3 = Keep (might be White/Black team)" -ForegroundColor Cyan
             $adminChoice = Read-Host "Action for $($admin.Name) (1-3)"
             
             switch ($adminChoice) {
                 "1" {
-                    try {
-                        Remove-LocalGroupMember -Group "Administrators" -Member $admin.Name
-                        Log-Action "Removed from Administrators: $($admin.Name)"
-                        Write-Host "Removed from Administrators: $($admin.Name)" -ForegroundColor Green
-                    } catch {
-                        Log-Action "Failed to remove admin $($admin.Name) $_"
-                        Write-Host "Failed to remove: $($admin.Name)" -ForegroundColor Red
-                    }
-                }
-                "2" {
                     $adminUsername = $admin.Name.Split('\')[-1]
                     try {
                         Disable-LocalUser -Name $adminUsername
@@ -155,6 +145,16 @@ function Secure-Users {
                     } catch {
                         Log-Action "Failed to disable admin $adminUsername $_"
                         Write-Host "Failed to disable: $adminUsername" -ForegroundColor Red
+                    }
+                }
+                "2" {
+                    try {
+                        Remove-LocalGroupMember -Group "Administrators" -Member $admin.Name
+                        Log-Action "Removed from Administrators: $($admin.Name)"
+                        Write-Host "Removed from Administrators: $($admin.Name)" -ForegroundColor Green
+                    } catch {
+                        Log-Action "Failed to remove admin $($admin.Name) $_"
+                        Write-Host "Failed to remove: $($admin.Name)" -ForegroundColor Red
                     }
                 }
                 "3" {
