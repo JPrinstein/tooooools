@@ -73,7 +73,7 @@ function Get-CurrentState {
     $profiles = Get-NetFirewallProfile
     foreach ($profile in $profiles) {
         $state.FirewallProfiles[$profile.Name] = @{
-            Enabled = $profile.Enabled
+            Enabled = [bool]$profile.Enabled
             DefaultInboundAction = $profile.DefaultInboundAction.ToString()
             DefaultOutboundAction = $profile.DefaultOutboundAction.ToString()
         }
@@ -197,8 +197,12 @@ function Compare-States {
     Write-Host "`nSERVICE CHANGES" -ForegroundColor Green
     $changesFound = $false
     
-    foreach ($serviceName in $NewState.Services.Keys) {
-        if ($OldState.Services.PSObject.Properties.Name -contains $serviceName) {
+    # Check for new or removed services
+    $newServiceNames = $NewState.Services.Keys
+    $oldServiceNames = $OldState.Services.PSObject.Properties.Name
+    
+    foreach ($serviceName in $newServiceNames) {
+        if ($serviceName -in $oldServiceNames) {
             $oldSvc = $OldState.Services.$serviceName
             $newSvc = $NewState.Services.$serviceName
             
@@ -226,12 +230,12 @@ function Compare-States {
             $oldProfile = $OldState.FirewallProfiles.$profileName
             $newProfile = $NewState.FirewallProfiles.$profileName
             
-            # Convert boolean to string for comparison
-            $oldEnabled = $oldProfile.Enabled.ToString()
-            $newEnabled = $newProfile.Enabled.ToString()
+            # Ensure we're comparing booleans properly
+            $oldEnabled = [bool]$oldProfile.Enabled
+            $newEnabled = [bool]$newProfile.Enabled
             
             if ($newEnabled -ne $oldEnabled) {
-                $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
+                $status = if ($newEnabled) {"ENABLED"} else {"DISABLED"}
                 Send-Alert "FIREWALL PROFILE $status`: $profileName" "CRITICAL"
                 $changesFound = $true
             }
