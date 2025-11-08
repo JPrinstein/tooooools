@@ -47,7 +47,7 @@ function Get-CurrentState {
         @{
             Name = $_.Name
             Enabled = $_.Enabled
-            PasswordLastSet = $_.PasswordLastSet.ToString()
+            PasswordLastSet = if ($_.PasswordLastSet) { $_.PasswordLastSet.ToString() } else { "Never" }
         }
     }
     
@@ -96,7 +96,7 @@ function Get-CurrentState {
                 $state.Processes += @{
                     Name = $proc.Name
                     Id = $proc.Id
-                    Path = $proc.Path
+                    Path = if ($proc.Path) { $proc.Path } else { "Unknown" }
                 }
             }
         }
@@ -116,7 +116,7 @@ function Get-CurrentState {
                 RemoteAddress = $conn.RemoteAddress
                 RemotePort = $conn.RemotePort
                 LocalPort = $conn.LocalPort
-                Process = $proc.Name
+                Process = if ($proc) { $proc.Name } else { "Unknown" }
             }
         }
     }
@@ -127,7 +127,7 @@ function Get-CurrentState {
 function Compare-States {
     param($OldState, $NewState)
     
-    Write-Host "COMPARISON" -ForegroundColor Cyan
+    Write-Host "`nCOMPARISON" -ForegroundColor Cyan
     Write-Host "Previous: $($OldState.Timestamp)" -ForegroundColor Yellow
     Write-Host "Current:  $($NewState.Timestamp)" -ForegroundColor Yellow
     
@@ -135,8 +135,8 @@ function Compare-States {
     
     Write-Host "`nUSER CHANGES" -ForegroundColor Green
     
-    $oldUserNames = $OldState.Users.Name
-    $newUserNames = $NewState.Users.Name
+    $oldUserNames = $OldState.Users | ForEach-Object { $_.Name }
+    $newUserNames = $NewState.Users | ForEach-Object { $_.Name }
     
     $addedUsers = $newUserNames | Where-Object {$_ -notin $oldUserNames}
     foreach ($user in $addedUsers) {
@@ -198,9 +198,9 @@ function Compare-States {
     $changesFound = $false
     
     foreach ($serviceName in $NewState.Services.Keys) {
-        if ($OldState.Services.ContainsKey($serviceName)) {
-            $oldSvc = $OldState.Services[$serviceName]
-            $newSvc = $NewState.Services[$serviceName]
+        if ($OldState.Services.PSObject.Properties.Name -contains $serviceName) {
+            $oldSvc = $OldState.Services.$serviceName
+            $newSvc = $NewState.Services.$serviceName
             
             if ($newSvc.Status -ne $oldSvc.Status) {
                 Send-Alert "SERVICE STATUS CHANGED: $serviceName from $($oldSvc.Status) to $($newSvc.Status)" "WARNING"
@@ -215,15 +215,15 @@ function Compare-States {
     }
     
     if (-not $changesFound) {
-        Write-Host "No service changes detected" -ForegroundColor Gray
+        Write-Host "  No service changes detected" -ForegroundColor Gray
     }
     
     Write-Host "`nFIREWALL PROFILE CHANGES" -ForegroundColor Green
     $changesFound = $false
     
     foreach ($profileName in $NewState.FirewallProfiles.Keys) {
-        $oldProfile = $OldState.FirewallProfiles[$profileName]
-        $newProfile = $NewState.FirewallProfiles[$profileName]
+        $oldProfile = $OldState.FirewallProfiles.$profileName
+        $newProfile = $NewState.FirewallProfiles.$profileName
         
         if ($newProfile.Enabled -ne $oldProfile.Enabled) {
             $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
@@ -243,15 +243,14 @@ function Compare-States {
     }
     
     if (-not $changesFound) {
-        Write-Host "No firewall profile changes detected" -ForegroundColor Gray
+        Write-Host "  No firewall profile changes detected" -ForegroundColor Gray
     }
     
-    # ==================== COMPARE FIREWALL RULES ====================
     Write-Host "`nFIREWALL RULE CHANGES" -ForegroundColor Green
     $changesFound = $false
     
-    $oldRuleNames = $OldState.FirewallRules.Name
-    $newRuleNames = $NewState.FirewallRules.Name
+    $oldRuleNames = $OldState.FirewallRules | ForEach-Object { $_.Name }
+    $newRuleNames = $NewState.FirewallRules | ForEach-Object { $_.Name }
     
     $addedRules = $newRuleNames | Where-Object {$_ -notin $oldRuleNames}
     foreach ($ruleName in $addedRules) {
@@ -268,7 +267,7 @@ function Compare-States {
     }
     
     if (-not $changesFound) {
-        Write-Host "No firewall rule changes detected" -ForegroundColor Gray
+        Write-Host "  No firewall rule changes detected" -ForegroundColor Gray
     }
     
     Write-Host "`nSUSPICIOUS PROCESSES" -ForegroundColor Green
@@ -282,7 +281,7 @@ function Compare-States {
     }
     
     if (-not $changesFound) {
-        Write-Host "No suspicious processes detected" -ForegroundColor Gray
+        Write-Host "  No suspicious processes detected" -ForegroundColor Gray
     }
     
     Write-Host "`nEXTERNAL CONNECTIONS" -ForegroundColor Green
@@ -311,8 +310,9 @@ function Compare-States {
     }
 }
 
-
+Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "SNAPSHOT-BASED SECURITY MONITOR" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Machine: $hostname" -ForegroundColor Cyan
 Write-Host "Time: $timestamp" -ForegroundColor Cyan
 
@@ -321,22 +321,22 @@ $currentState = Get-CurrentState
 
 # Check if previous state exists
 if (Test-Path $StateFile) {
-    Write-Host "`nPrevious state file found-comparing changes" -ForegroundColor Yellow
+    Write-Host "`nPrevious state file found - comparing changes" -ForegroundColor Yellow
     
     try {
-        $previousState = Get-Content $StateFile -Raw | ConvertFrom-Json
+        $previousStateJson = Get-Content $StateFile -Raw | ConvertFrom-Json
         
-        # Convert JSON
+        # Convert JSON back to proper hashtables
         $oldState = @{
-            Timestamp = $previousState.Timestamp
-            Hostname = $previousState.Hostname
-            Users = $previousState.Users
-            Administrators = $previousState.Administrators
-            Services = $previousState.Services
-            FirewallProfiles = $previousState.FirewallProfiles
-            FirewallRules = $previousState.FirewallRules
-            Processes = $previousState.Processes
-            Connections = $previousState.Connections
+            Timestamp = $previousStateJson.Timestamp
+            Hostname = $previousStateJson.Hostname
+            Users = @($previousStateJson.Users)
+            Administrators = @($previousStateJson.Administrators)
+            Services = $previousStateJson.Services
+            FirewallProfiles = $previousStateJson.FirewallProfiles
+            FirewallRules = @($previousStateJson.FirewallRules)
+            Processes = @($previousStateJson.Processes)
+            Connections = @($previousStateJson.Connections)
         }
         
         # Compare states
@@ -348,7 +348,7 @@ if (Test-Path $StateFile) {
     }
     
 } else {
-    Write-Host "`nNo previous state found-creating initial baseline" -ForegroundColor Yellow
+    Write-Host "`nNo previous state found - creating initial baseline" -ForegroundColor Yellow
     Write-Host "Run this script again to detect changes" -ForegroundColor Green
 }
 
@@ -361,5 +361,6 @@ try {
 }
 
 Write-Host "`nAlerts logged to: C:\SecurityMonitor_Alerts.log" -ForegroundColor Cyan
-Write-Host "`n" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Monitoring complete. Run again to check for new changes." -ForegroundColor Green
+Write-Host "========================================`n" -ForegroundColor Cyan
