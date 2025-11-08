@@ -73,7 +73,7 @@ function Get-CurrentState {
     $profiles = Get-NetFirewallProfile
     foreach ($profile in $profiles) {
         $state.FirewallProfiles[$profile.Name] = @{
-            Enabled = $profile.Enabled
+            Enabled = [bool]$profile.Enabled
             DefaultInboundAction = $profile.DefaultInboundAction.ToString()
             DefaultOutboundAction = $profile.DefaultOutboundAction.ToString()
         }
@@ -197,8 +197,12 @@ function Compare-States {
     Write-Host "`nSERVICE CHANGES" -ForegroundColor Green
     $changesFound = $false
     
-    foreach ($serviceName in $NewState.Services.Keys) {
-        if ($OldState.Services.PSObject.Properties.Name -contains $serviceName) {
+    # Check for new or removed services
+    $newServiceNames = $NewState.Services.Keys
+    $oldServiceNames = $OldState.Services.PSObject.Properties.Name
+    
+    foreach ($serviceName in $newServiceNames) {
+        if ($serviceName -in $oldServiceNames) {
             $oldSvc = $OldState.Services.$serviceName
             $newSvc = $NewState.Services.$serviceName
             
@@ -217,6 +221,9 @@ function Compare-States {
     if (-not $changesFound) {
         Write-Host "  No service changes detected" -ForegroundColor Gray
     }
+    
+    Write-Host "`nFIREWALL PROFILE CHANGES" -ForegroundColor Green
+    $changesFound = $false
     
     Write-Host "`nFIREWALL PROFILE CHANGES" -ForegroundColor Green
     $changesFound = $false
