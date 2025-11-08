@@ -75,7 +75,7 @@ $foundSuspicious = $false
 foreach ($proc in $processes) {
     foreach ($suspicious in $suspiciousNames) {
         if ($proc.Name -like "*$suspicious*") {
-            Write-Host "$($proc.Name) (PID: $($proc.Id)) - Path: $($proc.Path)" -ForegroundColor Red
+            Write-Host "$($proc.Name) (PID: $($proc.Id)) - Path: $($proc.Path)" -ForegroundColor Yellow
             $foundSuspicious = $true
         }
     }
