@@ -37,9 +37,9 @@ function Test-Result {
     $script:testResults += $result
     
     $color = if ($Pass) { "Green" } else { "Red" }
-    $status = if ($Pass) { "✓ PASS" } else { "✗ FAIL" }
+    $status = if ($Pass) { "[PASS]" } else { "[FAIL]" }
     
-    Write-Host "[$status] $TestName" -ForegroundColor $color
+    Write-Host "$status $TestName" -ForegroundColor $color
     if ($Verbose) {
         Write-Host "  Expected: $Expected" -ForegroundColor Gray
         Write-Host "  Actual: $Actual" -ForegroundColor Gray
@@ -466,9 +466,9 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 
 foreach ($result in $testResults) {
     $symbol = switch ($result.Pass) {
-        $true { "✓" }
-        $false { "✗" }
-        $null { "⊘" }
+        $true { "[PASS]" }
+        $false { "[FAIL]" }
+        $null { "[SKIP]" }
     }
     $color = switch ($result.Pass) {
         $true { "Green" }
@@ -476,7 +476,7 @@ foreach ($result in $testResults) {
         $null { "Yellow" }
     }
     
-    Write-Host "[$symbol] $($result.Test)" -ForegroundColor $color
+    Write-Host "$symbol $($result.Test)" -ForegroundColor $color
     if ($Verbose -or -not $result.Pass) {
         Write-Host "    Expected: $($result.Expected)" -ForegroundColor Gray
         Write-Host "    Actual: $($result.Actual)" -ForegroundColor Gray
@@ -489,13 +489,13 @@ Write-Host "RECOMMENDATIONS" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
 if ($failedTests -eq 0) {
-    Write-Host "✓ All tests passed! defender.ps1 is working correctly." -ForegroundColor Green
+    Write-Host "[OK] All tests passed! defender.ps1 is working correctly." -ForegroundColor Green
     Write-Host "  You're ready for competition!" -ForegroundColor Green
 } elseif ($passRate -ge 80) {
-    Write-Host "⚠ Most tests passed, but some issues detected." -ForegroundColor Yellow
+    Write-Host "[WARNING] Most tests passed, but some issues detected." -ForegroundColor Yellow
     Write-Host "  Review failed tests and fix before competition." -ForegroundColor Yellow
 } else {
-    Write-Host "✗ Multiple test failures detected." -ForegroundColor Red
+    Write-Host "[ERROR] Multiple test failures detected." -ForegroundColor Red
     Write-Host "  defender.ps1 needs troubleshooting before use." -ForegroundColor Red
 }
 
