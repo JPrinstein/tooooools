@@ -575,6 +575,6 @@ switch -Wildcard ($hostname) {
 Check-Persistence
 Check-Network
 
-Log-Action "IR SCRIPT COMPLETED"
+Log-Action "IR SCRIPT COMPLETED!"
 Log-Action "Log file saved to: $logFile"
 Write-Host "`nLog file saved to: $logFile" -ForegroundColor Green
