@@ -222,23 +222,29 @@ function Compare-States {
     $changesFound = $false
     
     foreach ($profileName in $NewState.FirewallProfiles.Keys) {
-        $oldProfile = $OldState.FirewallProfiles.$profileName
-        $newProfile = $NewState.FirewallProfiles.$profileName
-        
-        if ($newProfile.Enabled -ne $oldProfile.Enabled) {
-            $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
-            Send-Alert "FIREWALL PROFILE $status`: $profileName" "CRITICAL"
-            $changesFound = $true
-        }
-        
-        if ($newProfile.DefaultInboundAction -ne $oldProfile.DefaultInboundAction) {
-            Send-Alert "FIREWALL INBOUND CHANGED: $profileName from $($oldProfile.DefaultInboundAction) to $($newProfile.DefaultInboundAction)" "WARNING"
-            $changesFound = $true
-        }
-        
-        if ($newProfile.DefaultOutboundAction -ne $oldProfile.DefaultOutboundAction) {
-            Send-Alert "FIREWALL OUTBOUND CHANGED: $profileName from $($oldProfile.DefaultOutboundAction) to $($newProfile.DefaultOutboundAction)" "WARNING"
-            $changesFound = $true
+        if ($OldState.FirewallProfiles.PSObject.Properties.Name -contains $profileName) {
+            $oldProfile = $OldState.FirewallProfiles.$profileName
+            $newProfile = $NewState.FirewallProfiles.$profileName
+            
+            # Convert boolean to string for comparison
+            $oldEnabled = $oldProfile.Enabled.ToString()
+            $newEnabled = $newProfile.Enabled.ToString()
+            
+            if ($newEnabled -ne $oldEnabled) {
+                $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
+                Send-Alert "FIREWALL PROFILE $status`: $profileName" "CRITICAL"
+                $changesFound = $true
+            }
+            
+            if ($newProfile.DefaultInboundAction -ne $oldProfile.DefaultInboundAction) {
+                Send-Alert "FIREWALL INBOUND CHANGED: $profileName from $($oldProfile.DefaultInboundAction) to $($newProfile.DefaultInboundAction)" "CRITICAL"
+                $changesFound = $true
+            }
+            
+            if ($newProfile.DefaultOutboundAction -ne $oldProfile.DefaultOutboundAction) {
+                Send-Alert "FIREWALL OUTBOUND CHANGED: $profileName from $($oldProfile.DefaultOutboundAction) to $($newProfile.DefaultOutboundAction)" "WARNING"
+                $changesFound = $true
+            }
         }
     }
     
