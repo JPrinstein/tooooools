@@ -196,7 +196,7 @@ function Configure-Firewall {
     Log-Action "FIREWALL CONFIGURATION"
     
     # Enable firewall for all profiles
-    Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
+    Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled "True"
     Log-Action "Enabled Windows Firewall on all profiles"
     
     # Set default deny
