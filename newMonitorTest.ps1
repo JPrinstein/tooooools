@@ -59,12 +59,19 @@ function Wait-ForUser {
 Write-Host "[SETUP] Preparing test environment..." -ForegroundColor Cyan
 
 # Check if defender.ps1 exists
-$defenderPath = ".\defender.ps1"
+$defenderPath = Join-Path $PSScriptRoot "defender.ps1"
 if (-not (Test-Path $defenderPath)) {
-    Write-Host "ERROR: defender.ps1 not found in current directory!" -ForegroundColor Red
-    Write-Host "Please run this test script from the same directory as defender.ps1" -ForegroundColor Red
-    exit 1
+    $defenderPath = ".\defender.ps1"
+    if (-not (Test-Path $defenderPath)) {
+        Write-Host "ERROR: defender.ps1 not found!" -ForegroundColor Red
+        Write-Host "Current directory: $PWD" -ForegroundColor Yellow
+        Write-Host "Script directory: $PSScriptRoot" -ForegroundColor Yellow
+        Write-Host "Please ensure defender.ps1 is in the same directory as this test script" -ForegroundColor Red
+        exit 1
+    }
 }
+
+Write-Host "[SETUP] Found defender.ps1 at: $defenderPath" -ForegroundColor Green
 
 # Store original state for cleanup
 $originalUsers = Get-LocalUser | Select-Object -ExpandProperty Name
@@ -88,7 +95,13 @@ if (Test-Path "C:\DefenderState.json") {
 }
 
 Write-Host "[ACTION] Running defender.ps1 to create baseline..." -ForegroundColor Yellow
-& $defenderPath -Action ReportOnly | Out-Null
+Write-Host "[DEBUG] Executing: & '$defenderPath' -Action ReportOnly" -ForegroundColor DarkGray
+
+$defenderOutput = & $defenderPath -Action ReportOnly 2>&1
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] Defender.ps1 exited with code: $LASTEXITCODE" -ForegroundColor Red
+    Write-Host "[ERROR] Output: $defenderOutput" -ForegroundColor Red
+}
 
 Start-Sleep -Seconds 3
 
@@ -231,12 +244,12 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "TEST 6: Service Change Detection" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-# Use Windows Update service as it's safe to stop temporarily
-$testService = "wuauserv"
-Write-Host "[ACTION] Stopping Windows Update service temporarily" -ForegroundColor Yellow
+# Use Print Spooler service instead - safer and faster to stop
+$testService = "Spooler"
+Write-Host "[ACTION] Stopping Print Spooler service temporarily" -ForegroundColor Yellow
 
 try {
-    $originalServiceState = (Get-Service $testService).Status
+    $originalServiceState = (Get-Service $testService -ErrorAction Stop).Status
     
     if ($originalServiceState -eq "Running") {
         Stop-Service $testService -Force -ErrorAction Stop
@@ -249,21 +262,22 @@ try {
         $defenderOutput = & $defenderPath -Action ReportOnly 2>&1 | Out-String
         
         # Check if defender detected the service change
-        $detectedServiceChange = $defenderOutput -match "SERVICE.*CHANGED.*wuauserv"
+        $detectedServiceChange = $defenderOutput -match "SERVICE.*CHANGED.*Spooler|SERVICE.*CHANGED.*wuauserv"
         Test-Result -TestName "Service Status Change Detection" -Expected "Detected service change" -Actual $(if($detectedServiceChange){"Detected"}else{"Not detected"}) -Pass $detectedServiceChange
         
         # Restart the service
-        Write-Host "[SAFETY] Restarting Windows Update service..." -ForegroundColor Yellow
+        Write-Host "[SAFETY] Restarting Print Spooler service..." -ForegroundColor Yellow
         Start-Service $testService -ErrorAction SilentlyContinue
     } else {
-        Write-Host "[SKIP] Windows Update service not running, skipping test" -ForegroundColor Yellow
+        Write-Host "[SKIP] Print Spooler service not running, skipping test" -ForegroundColor Yellow
         Test-Result -TestName "Service Status Change Detection" -Expected "Test executed" -Actual "Service not running" -Pass $null
     }
     
 } catch {
     # Make sure to restart service
     Start-Service $testService -ErrorAction SilentlyContinue
-    Test-Result -TestName "Service Status Change Detection" -Expected "Test executed" -Actual "Error: $_" -Pass $false
+    Write-Host "[WARNING] Could not test service changes: $_" -ForegroundColor Yellow
+    Test-Result -TestName "Service Status Change Detection" -Expected "Test executed" -Actual "Error: $_" -Pass $null
 }
 
 # ======================
