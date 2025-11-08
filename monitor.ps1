@@ -230,13 +230,12 @@ function Compare-States {
             $oldProfile = $OldState.FirewallProfiles.$profileName
             $newProfile = $NewState.FirewallProfiles.$profileName
             
-            # Debug output to see what we're comparing
-            # Write-Host "  [DEBUG] $profileName - Old Enabled: $($oldProfile.Enabled) (Type: $($oldProfile.Enabled.GetType().Name))" -ForegroundColor Gray
-            # Write-Host "  [DEBUG] $profileName - New Enabled: $($newProfile.Enabled) (Type: $($newProfile.Enabled.GetType().Name))" -ForegroundColor Gray
+            # Ensure we're comparing booleans properly
+            $oldEnabled = [bool]$oldProfile.Enabled
+            $newEnabled = [bool]$newProfile.Enabled
             
-            # Direct comparison without casting
-            if ($newProfile.Enabled -ne $oldProfile.Enabled) {
-                $status = if ($newProfile.Enabled) {"ENABLED"} else {"DISABLED"}
+            if ($newEnabled -ne $oldEnabled) {
+                $status = if ($newEnabled) {"ENABLED"} else {"DISABLED"}
                 Send-Alert "FIREWALL PROFILE $status`: $profileName" "CRITICAL"
                 $changesFound = $true
             }
@@ -260,21 +259,19 @@ function Compare-States {
     Write-Host "`nFIREWALL RULE CHANGES" -ForegroundColor Green
     $changesFound = $false
     
-    $oldRuleNames = @($OldState.FirewallRules | ForEach-Object { $_.Name })
-    $newRuleNames = @($NewState.FirewallRules | ForEach-Object { $_.Name })
+    $oldRuleNames = $OldState.FirewallRules | ForEach-Object { $_.Name }
+    $newRuleNames = $NewState.FirewallRules | ForEach-Object { $_.Name }
     
-    # Find added rules
-    $addedRules = $newRuleNames | Where-Object {$_ -notin $oldRuleNames} | Select-Object -Unique
+    $addedRules = $newRuleNames | Where-Object {$_ -notin $oldRuleNames}
     foreach ($ruleName in $addedRules) {
-        $rule = $NewState.FirewallRules | Where-Object {$_.Name -eq $ruleName} | Select-Object -First 1
+        $rule = $NewState.FirewallRules | Where-Object {$_.Name -eq $ruleName}
         Send-Alert "NEW FIREWALL RULE: $($rule.DisplayName) [$($rule.Direction) - $($rule.Action)]" "WARNING"
         $changesFound = $true
     }
     
-    # Find removed rules
-    $removedRules = $oldRuleNames | Where-Object {$_ -notin $newRuleNames} | Select-Object -Unique
+    $removedRules = $oldRuleNames | Where-Object {$_ -notin $newRuleNames}
     foreach ($ruleName in $removedRules) {
-        $rule = $OldState.FirewallRules | Where-Object {$_.Name -eq $ruleName} | Select-Object -First 1
+        $rule = $OldState.FirewallRules | Where-Object {$_.Name -eq $ruleName}
         Send-Alert "FIREWALL RULE REMOVED: $($rule.DisplayName)" "WARNING"
         $changesFound = $true
     }
